@@ -111,12 +111,12 @@ void ticker_fn_ep(int argc, char **argv)
 }
 
 static env_t *env;
-bool wait = false;
 
 void high_prio_fn(int argc, char **argv)
 {
     seL4_CPtr ntfn = (seL4_CPtr) atol(argv[0]);
     ccnt_t last, curr = 0;
+    bool wait = false;
     while (1) {
         last = curr;
         SEL4BENCH_READ_CCNT(curr);
