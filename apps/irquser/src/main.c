@@ -111,12 +111,12 @@ void ticker_fn_ep(int argc, char **argv)
 }
 
 static env_t *env;
+bool wait = false;
 
 void high_prio_fn(int argc, char **argv)
 {
     seL4_CPtr ntfn = (seL4_CPtr) atol(argv[0]);
     ccnt_t last, curr = 0;
-    bool wait = false;
     while (1) {
         last = curr;
         SEL4BENCH_READ_CCNT(curr);
@@ -142,7 +142,7 @@ void low_prio_fn(int argc, char **argv)
 
     for (int i = 0; i < N_RUNS; i++) {
         printf("Waiting for interrupt\n");
-        seL4_NBSendWait(ntfn, tag, timer_signal, &badge);
+        wait ? seL4_NBSendWait(ntfn, tag, timer_signal, &badge) : seL4_Wait(timer_signal, &badge);
         printf("Got interrupt\n");
         sel4platsupport_irq_handle(irq_ops, timer_ntfn_id, badge);
     }
@@ -335,13 +335,23 @@ int main(int argc, char **argv)
     error = vka_alloc_notification(&env->slab_vka, &ntfn);
     ZF_LOGF_IF(error, "Failed to allocate notification object");
 
+    seL4_CPtr sched_control = simple_get_sched_ctrl(&env->simple, 0);
+    if (sched_control == seL4_CapNull) {
+        ZF_LOGF("Failed to get sched control cap");
+    }
+
     // setup args
     char irq_signal_low_strings[1][WORD_STRING_SIZE];
     char *irq_signal_low_argv[1];
     sel4utils_create_word_args(irq_signal_low_strings, irq_signal_low_argv, 1, ntfn.cptr);
 
     benchmark_configure_thread(env, endpoint.cptr, seL4_MaxPrio - 1, "high_prio", &high);
+    error = seL4_SchedControl_Configure(sched_control, high.sched_context.cptr, US_IN_S, US_IN_S, 0, 0);
+    ZF_LOGF_IF(error != seL4_NoError, "Failed to configure schedcontext");
+
     benchmark_configure_thread(env, endpoint.cptr, seL4_MaxPrio - 2, "low_prio", &low);
+    error = seL4_SchedControl_Configure(sched_control, low.sched_context.cptr, US_IN_S, US_IN_S, 0, 0);
+    ZF_LOGF_IF(error != seL4_NoError, "Failed to configure schedcontext");
 
     error = sel4utils_start_thread(&low, (sel4utils_thread_entry_fn) low_prio_fn, (void *) 1, irq_signal_low_argv, true);
     if (error) {
