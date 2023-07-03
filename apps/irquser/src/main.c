@@ -115,11 +115,11 @@ static env_t *env;
 void high_prio_fn(int argc, char **argv)
 {
     sel4bench_init();
-    seL4_CPtr ntfn = (seL4_CPtr) atoi(argv[0]);
+    seL4_CPtr ntfn = (seL4_CPtr) atol(argv[0]);
     volatile bool *wait = (bool *) atol(argv[1]);
     ccnt_t *results = (ccnt_t *) atol(argv[2]);
     ccnt_t last, curr = 0;
-    ccnt_t i = 0;
+    uint64_t i = 0;
     while (1) {
         last = curr;
         SEL4BENCH_READ_CCNT(curr);
@@ -137,16 +137,12 @@ void low_prio_fn(int argc, char **argv)
 {
     seL4_CPtr ntfn = (seL4_CPtr) atol(argv[0]);
     volatile bool *wait = (bool *) atol(argv[1]);
-    // get rid of outstanding interrupt
+
     seL4_Word badge;
-    seL4_Wait(timer_signal, &badge);
-    sel4platsupport_irq_handle(irq_ops, timer_ntfn_id, badge);
     seL4_MessageInfo_t tag = seL4_MessageInfo_new(0, 0, 0, 0);
 
     for (int i = 0; i < N_RUNS; i++) {
-        // printf("Waiting for interrupt, wait = %d\n", *wait);
         *wait ? seL4_NBSendWait(ntfn, tag, timer_signal, &badge) : seL4_Wait(timer_signal, &badge);
-        // printf("Got interrupt\n");
         sel4platsupport_irq_handle(irq_ops, timer_ntfn_id, badge);
     }
     seL4_Send(done_ep, seL4_MessageInfo_new(0, 0, 0, 0));
@@ -329,7 +325,7 @@ int main(int argc, char **argv)
     seL4_CPtr auth = simple_get_tcb(&env->simple);
     seL4_TCB_SetPriority(SEL4UTILS_TCB_SLOT, auth, seL4_MaxPrio - 3);
 
-    // alloc ntfn
+    // local variables
     vka_object_t ntfn = {0};
     error = vka_alloc_notification(&env->slab_vka, &ntfn);
     ZF_LOGF_IF(error, "Failed to allocate notification object");
@@ -339,66 +335,55 @@ int main(int argc, char **argv)
         ZF_LOGF("Failed to get sched control cap");
     }
 
-    ccnt_t *results_n = (ccnt_t *) vspace_new_pages(&env->vspace, seL4_AllRights, 1, seL4_PageBits);
-
-    bool *wait = (bool *) vspace_new_pages(&env->vspace, seL4_AllRights, 1, seL4_PageBits);
-    assert(wait != NULL);
-    // setup args
-    char irq_signal_low_strings[2][WORD_STRING_SIZE];
-    char *irq_signal_low_argv[2];
-    sel4utils_create_word_args(irq_signal_low_strings, irq_signal_low_argv, 2, ntfn.cptr, wait);
-
-    // benchmark_configure_thread(env, endpoint.cptr, seL4_MaxPrio - 1, "high_prio", &high);
-
-    benchmark_configure_thread(env, endpoint.cptr, seL4_MaxPrio - 2, "low_prio", &low);
-    error = seL4_SchedControl_Configure(sched_control, low.sched_context.cptr, 5*US_IN_S, 5*US_IN_S, 0, 0);
-    ZF_LOGF_IF(error != seL4_NoError, "Failed to configure schedcontext");
-
-
-    // error = sel4utils_start_thread(&high, (sel4utils_thread_entry_fn) high_prio_fn, (void *) 1, irq_signal_low_argv, true);
-    // if (error) {
-    //     ZF_LOGF("Failed to start high prio thread");
-    // }
-
-
     sel4utils_process_t high_process;
     benchmark_shallow_clone_process(env, &high_process, seL4_MaxPrio - 1, high_prio_fn, "high_prio");
     error = seL4_SchedControl_Configure(sched_control, high_process.thread.sched_context.cptr, 5*US_IN_S, 5*US_IN_S, 0, 0);
     ZF_LOGF_IF(error != seL4_NoError, "Failed to configure schedcontext");
 
-    //craete args
-    char high_prio_strings[3][WORD_STRING_SIZE];
-    char *high_prio_argv[3];
-
-    cspacepath_t path;
-
-    // clone ntfn to process addrspace
-    vka_cspace_make_path(&env->slab_vka, ntfn.cptr, &path);
-    seL4_CPtr ntfn_remote = sel4utils_copy_path_to_process(&high_process, path);
-    assert(ntfn_remote != seL4_CapNull);
-    // printf("ntfn_remote: %x\n", ntfn_remote);
-
+    bool *wait = (bool *) vspace_new_pages(&env->vspace, seL4_AllRights, 1, seL4_PageBits);
+    assert(wait != NULL);
     *wait = false;
+
     void *wait_remote = vspace_share_mem(&env->vspace, &high_process.vspace, wait, 1, seL4_PageBits, seL4_AllRights, true);
     assert(wait_remote != NULL);
 
-    void *results_n_remote = vspace_share_mem(&env->vspace, &high_process.vspace, results_n, 1, seL4_PageBits, seL4_AllRights, true);
+    ccnt_t *results_local = (ccnt_t *) vspace_new_pages(&env->vspace, seL4_AllRights, 1, seL4_PageBits);
 
-    sel4utils_create_word_args(high_prio_strings, high_prio_argv, 3, ntfn_remote, wait_remote, results_n_remote);
+    void *results_remote = vspace_share_mem(&env->vspace, &high_process.vspace, results_local, 1, seL4_PageBits, seL4_AllRights, true);
+    assert(results_remote != NULL);
+    
+    cspacepath_t ntfn_path;
 
-    error = sel4utils_start_thread(&low, (sel4utils_thread_entry_fn) low_prio_fn, (void *) 2, irq_signal_low_argv, true);
+    vka_cspace_make_path(&env->slab_vka, ntfn.cptr, &ntfn_path);
+    seL4_CPtr ntfn_remote = sel4utils_copy_path_to_process(&high_process, ntfn_path);
+    assert(ntfn_remote != seL4_CapNull);
+
+    char low_prio_strings[2][WORD_STRING_SIZE];
+    char *low_prio_argv[2];
+    sel4utils_create_word_args(low_prio_strings, low_prio_argv, 2, ntfn.cptr, wait);
+
+    char high_prio_strings[3][WORD_STRING_SIZE];
+    char *high_prio_argv[3];
+    sel4utils_create_word_args(high_prio_strings, high_prio_argv, 3, ntfn_remote, wait_remote, results_remote);
+
+    benchmark_configure_thread(env, endpoint.cptr, seL4_MaxPrio - 2, "low_prio", &low);
+    error = seL4_SchedControl_Configure(sched_control, low.sched_context.cptr, 5*US_IN_S, 5*US_IN_S, 0, 0);
+    ZF_LOGF_IF(error != seL4_NoError, "Failed to configure schedcontext");
+
+    error = sel4utils_start_thread(&low, (sel4utils_thread_entry_fn) low_prio_fn, (void *) 2, low_prio_argv, true);
     if (error) {
         ZF_LOGF("Failed to start low prio thread");
     }
-    int err = benchmark_spawn_process(&high_process, &env->slab_vka, &env->vspace, 3, high_prio_argv, 1);
-    if (err) {
+
+    error = benchmark_spawn_process(&high_process, &env->slab_vka, &env->vspace, 3, high_prio_argv, 1);
+    if (error) {
         ZF_LOGF("Failed to start test process");
     }
 
     benchmark_wait_children(endpoint.cptr, "children of irq-user", 1);
 
     for (ccnt_t i = 0; i < 100; i++) {
-        printf("results_n[%d]: %llu\n", i, results_n[i]);
+        printf("results_local[%d]: %llu\n", i, results_local[i]);
     }
 
     /* done -> results are stored in shared memory so we can now return */
