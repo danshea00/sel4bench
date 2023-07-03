@@ -121,7 +121,7 @@ void high_prio_fn(int argc, char **argv)
         last = curr;
         SEL4BENCH_READ_CCNT(curr);
         if (curr - last > 100 && !wait) {
-            printf("Diff: %llu\n", curr - last);
+            printf("%llu\n", curr - last);
             wait = true;
             seL4_Wait(ntfn, NULL);
         } else {
@@ -141,9 +141,7 @@ void low_prio_fn(int argc, char **argv)
     seL4_MessageInfo_t tag = seL4_MessageInfo_new(0, 0, 0, 0);
 
     for (int i = 0; i < N_RUNS; i++) {
-        printf("Waiting for interrupt\n");
         wait ? seL4_NBSendWait(ntfn, tag, timer_signal, &badge) : seL4_Wait(timer_signal, &badge);
-        printf("Got interrupt\n");
         sel4platsupport_irq_handle(irq_ops, timer_ntfn_id, badge);
     }
     seL4_Send(done_ep, seL4_MessageInfo_new(0, 0, 0, 0));
@@ -321,10 +319,6 @@ int main(int argc, char **argv)
 
     // error = seL4_TCB_Suspend(ticker.tcb.cptr);
     // assert(error == seL4_NoError);
-
-    // set timer rate
-    error = ltimer_set_timeout(&env->ltimer, 3 * INTERRUPT_PERIOD_NS, TIMEOUT_PERIODIC);
-    ZF_LOGF_IF(error, "Failed to set timer rate");
 
     // set this threads priority to be the lowest
     seL4_CPtr auth = simple_get_tcb(&env->simple);
