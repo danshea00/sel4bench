@@ -111,21 +111,24 @@ void ticker_fn_ep(int argc, char **argv)
 }
 
 static env_t *env;
-bool wait = false;
 
 void high_prio_fn(int argc, char **argv)
 {
-    seL4_CPtr ntfn = (seL4_CPtr) atol(argv[0]);
+    sel4bench_init();
+    seL4_CPtr ntfn = (seL4_CPtr) atoi(argv[0]);
+    volatile bool *wait = (bool *) atol(argv[1]);
+    ccnt_t *results = (ccnt_t *) atol(argv[2]);
     ccnt_t last, curr = 0;
+    ccnt_t i = 0;
     while (1) {
         last = curr;
         SEL4BENCH_READ_CCNT(curr);
-        if (curr - last > 100 && !wait) {
-            printf("%llu\n", curr - last);
-            wait = true;
+        if (curr - last > 100 && !*wait) {
+            results[i++] = curr - last;
+            *wait = true;
             seL4_Wait(ntfn, NULL);
         } else {
-            wait = false;
+            *wait = false;
         }
     }
 }
@@ -133,7 +136,7 @@ void high_prio_fn(int argc, char **argv)
 void low_prio_fn(int argc, char **argv)
 {
     seL4_CPtr ntfn = (seL4_CPtr) atol(argv[0]);
-
+    volatile bool *wait = (bool *) atol(argv[1]);
     // get rid of outstanding interrupt
     seL4_Word badge;
     seL4_Wait(timer_signal, &badge);
@@ -141,7 +144,9 @@ void low_prio_fn(int argc, char **argv)
     seL4_MessageInfo_t tag = seL4_MessageInfo_new(0, 0, 0, 0);
 
     for (int i = 0; i < N_RUNS; i++) {
-        wait ? seL4_NBSendWait(ntfn, tag, timer_signal, &badge) : seL4_Wait(timer_signal, &badge);
+        // printf("Waiting for interrupt, wait = %d\n", *wait);
+        *wait ? seL4_NBSendWait(ntfn, tag, timer_signal, &badge) : seL4_Wait(timer_signal, &badge);
+        // printf("Got interrupt\n");
         sel4platsupport_irq_handle(irq_ops, timer_ntfn_id, badge);
     }
     seL4_Send(done_ep, seL4_MessageInfo_new(0, 0, 0, 0));
@@ -334,30 +339,67 @@ int main(int argc, char **argv)
         ZF_LOGF("Failed to get sched control cap");
     }
 
-    // setup args
-    char irq_signal_low_strings[1][WORD_STRING_SIZE];
-    char *irq_signal_low_argv[1];
-    sel4utils_create_word_args(irq_signal_low_strings, irq_signal_low_argv, 1, ntfn.cptr);
+    ccnt_t *results_n = (ccnt_t *) vspace_new_pages(&env->vspace, seL4_AllRights, 1, seL4_PageBits);
 
-    benchmark_configure_thread(env, endpoint.cptr, seL4_MaxPrio - 1, "high_prio", &high);
-    error = seL4_SchedControl_Configure(sched_control, high.sched_context.cptr, US_IN_S, US_IN_S, 0, 0);
-    ZF_LOGF_IF(error != seL4_NoError, "Failed to configure schedcontext");
+    bool *wait = (bool *) vspace_new_pages(&env->vspace, seL4_AllRights, 1, seL4_PageBits);
+    assert(wait != NULL);
+    // setup args
+    char irq_signal_low_strings[2][WORD_STRING_SIZE];
+    char *irq_signal_low_argv[2];
+    sel4utils_create_word_args(irq_signal_low_strings, irq_signal_low_argv, 2, ntfn.cptr, wait);
+
+    // benchmark_configure_thread(env, endpoint.cptr, seL4_MaxPrio - 1, "high_prio", &high);
 
     benchmark_configure_thread(env, endpoint.cptr, seL4_MaxPrio - 2, "low_prio", &low);
-    error = seL4_SchedControl_Configure(sched_control, low.sched_context.cptr, US_IN_S, US_IN_S, 0, 0);
+    error = seL4_SchedControl_Configure(sched_control, low.sched_context.cptr, 5*US_IN_S, 5*US_IN_S, 0, 0);
     ZF_LOGF_IF(error != seL4_NoError, "Failed to configure schedcontext");
 
-    error = sel4utils_start_thread(&low, (sel4utils_thread_entry_fn) low_prio_fn, (void *) 1, irq_signal_low_argv, true);
+
+    // error = sel4utils_start_thread(&high, (sel4utils_thread_entry_fn) high_prio_fn, (void *) 1, irq_signal_low_argv, true);
+    // if (error) {
+    //     ZF_LOGF("Failed to start high prio thread");
+    // }
+
+
+    sel4utils_process_t high_process;
+    benchmark_shallow_clone_process(env, &high_process, seL4_MaxPrio - 1, high_prio_fn, "high_prio");
+    error = seL4_SchedControl_Configure(sched_control, high_process.thread.sched_context.cptr, 5*US_IN_S, 5*US_IN_S, 0, 0);
+    ZF_LOGF_IF(error != seL4_NoError, "Failed to configure schedcontext");
+
+    //craete args
+    char high_prio_strings[3][WORD_STRING_SIZE];
+    char *high_prio_argv[3];
+
+    cspacepath_t path;
+
+    // clone ntfn to process addrspace
+    vka_cspace_make_path(&env->slab_vka, ntfn.cptr, &path);
+    seL4_CPtr ntfn_remote = sel4utils_copy_path_to_process(&high_process, path);
+    assert(ntfn_remote != seL4_CapNull);
+    // printf("ntfn_remote: %x\n", ntfn_remote);
+
+    *wait = false;
+    void *wait_remote = vspace_share_mem(&env->vspace, &high_process.vspace, wait, 1, seL4_PageBits, seL4_AllRights, true);
+    assert(wait_remote != NULL);
+
+    void *results_n_remote = vspace_share_mem(&env->vspace, &high_process.vspace, results_n, 1, seL4_PageBits, seL4_AllRights, true);
+
+    sel4utils_create_word_args(high_prio_strings, high_prio_argv, 3, ntfn_remote, wait_remote, results_n_remote);
+
+    error = sel4utils_start_thread(&low, (sel4utils_thread_entry_fn) low_prio_fn, (void *) 2, irq_signal_low_argv, true);
     if (error) {
         ZF_LOGF("Failed to start low prio thread");
     }
-
-    error = sel4utils_start_thread(&high, (sel4utils_thread_entry_fn) high_prio_fn, (void *) 1, irq_signal_low_argv, true);
-    if (error) {
-        ZF_LOGF("Failed to start high prio thread");
+    int err = benchmark_spawn_process(&high_process, &env->slab_vka, &env->vspace, 3, high_prio_argv, 1);
+    if (err) {
+        ZF_LOGF("Failed to start test process");
     }
 
     benchmark_wait_children(endpoint.cptr, "children of irq-user", 1);
+
+    for (ccnt_t i = 0; i < 100; i++) {
+        printf("results_n[%d]: %llu\n", i, results_n[i]);
+    }
 
     /* done -> results are stored in shared memory so we can now return */
     benchmark_finished(EXIT_SUCCESS);
