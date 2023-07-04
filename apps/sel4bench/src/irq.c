@@ -120,7 +120,7 @@ static json_t *irquser_process(void *r)
         .name = "IRQ user measurement overhead"
     };
 
-    result_t results[5];
+    result_t results[6];
 
     results[0] = process_result(N_RUNS, raw_results->overheads, desc);
 
@@ -136,10 +136,11 @@ static json_t *irquser_process(void *r)
                                            raw_results->process_results_ep_sum,
                                            raw_results->process_results_ep_sum2,
                                            raw_results->process_results_ep);
+    results[5] = process_result(N_RUNS, raw_results->irq_signal_low_results, desc);
 
     char *types[] = {"Measurement overhead", "Without context switch",
                      "Without context switch (early processing)", "With context switch",
-                     "With context switch (early processing)"
+                     "With context switch (early processing)", "IRQ Signal to Low"
                     };
 
     column_t col = {
@@ -150,7 +151,7 @@ static json_t *irquser_process(void *r)
 
     result_set_t set = {
         .name = "IRQ path cycle count (measured from user level)",
-        .n_results = 5,
+        .n_results = 6,
         .results = results,
         .n_extra_cols = 1,
         .extra_cols = &col
