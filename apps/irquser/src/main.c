@@ -123,8 +123,9 @@ void high_prio_fn(int argc, char **argv)
     while (1) {
         last = curr;
         SEL4BENCH_READ_CCNT(curr);
-        if (curr - last > 100 && !*wait) {
-            results[i++] = curr - last;
+        ccnt_t diff = curr - last;
+        if (diff > 100 && !*wait) {
+            results[i++] = diff;
             *wait = true;
             seL4_Wait(ntfn, NULL);
         } else {
@@ -194,7 +195,7 @@ int main(int argc, char **argv)
 
     sel4bench_init();
 
-    sel4utils_thread_t ticker, spinner, high, low;
+    sel4utils_thread_t ticker, spinner, low;
 
     /* measurement overhead */
     ccnt_t start, end;
@@ -335,9 +336,13 @@ int main(int argc, char **argv)
         ZF_LOGF("Failed to get sched control cap");
     }
 
+    benchmark_configure_thread(env, endpoint.cptr, seL4_MaxPrio - 2, "low_prio", &low);
+    error = seL4_SchedControl_Configure(sched_control, low.sched_context.cptr, 5 * US_IN_S, 5 * US_IN_S, 0, 0);
+    ZF_LOGF_IF(error != seL4_NoError, "Failed to configure schedcontext");
+
     sel4utils_process_t high_process;
     benchmark_shallow_clone_process(env, &high_process, seL4_MaxPrio - 1, high_prio_fn, "high_prio");
-    error = seL4_SchedControl_Configure(sched_control, high_process.thread.sched_context.cptr, 5*US_IN_S, 5*US_IN_S, 0, 0);
+    error = seL4_SchedControl_Configure(sched_control, high_process.thread.sched_context.cptr, 5 * US_IN_S, 5 * US_IN_S, 0, 0);
     ZF_LOGF_IF(error != seL4_NoError, "Failed to configure schedcontext");
 
     bool *wait = (bool *) vspace_new_pages(&env->vspace, seL4_AllRights, 1, seL4_PageBits);
@@ -366,9 +371,6 @@ int main(int argc, char **argv)
     char *high_prio_argv[3];
     sel4utils_create_word_args(high_prio_strings, high_prio_argv, 3, ntfn_remote, wait_remote, results_remote);
 
-    benchmark_configure_thread(env, endpoint.cptr, seL4_MaxPrio - 2, "low_prio", &low);
-    error = seL4_SchedControl_Configure(sched_control, low.sched_context.cptr, 5*US_IN_S, 5*US_IN_S, 0, 0);
-    ZF_LOGF_IF(error != seL4_NoError, "Failed to configure schedcontext");
 
     error = sel4utils_start_thread(&low, (sel4utils_thread_entry_fn) low_prio_fn, (void *) 2, low_prio_argv, true);
     if (error) {
