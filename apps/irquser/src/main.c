@@ -322,6 +322,19 @@ int main(int argc, char **argv)
     error = seL4_TCB_Suspend(ticker.tcb.cptr);
     assert(error == seL4_NoError);
 
+    // init kernel log
+    // vka_object_t kernel_log_frame;
+    // if (vka_alloc_frame(&env->slab_vka, seL4_LargePageBits, &kernel_log_frame) != 0) {
+    //     ZF_LOGF("Failed to allocate ipc buffer");
+    // }
+
+    // if (kernel_logging_set_log_buffer(kernel_log_frame.cptr) != 0) {
+    //     ZF_LOGF("Failed to set kernel log buffer");
+    // }
+
+    // void *log_buffer = vspace_map_pages(&env->vspace, &kernel_log_frame.cptr, NULL, seL4_AllRights, 1, seL4_LargePageBits, 1);
+    // kernel_log_entry_t *kernel_log_buffer = (kernel_log_entry_t *)log_buffer;
+
     // set this threads priority to be the lowest
     seL4_CPtr auth = simple_get_tcb(&env->simple);
     seL4_TCB_SetPriority(SEL4UTILS_TCB_SLOT, auth, seL4_MaxPrio - 3);
@@ -383,6 +396,16 @@ int main(int argc, char **argv)
     }
 
     benchmark_wait_children(endpoint.cptr, "children of irq-user", 1);
+
+    // seL4_Word cnt = kernel_logging_finalize_log();
+    // printf("cnt: %d\n", cnt);
+
+    // for (int i = 0; i < cnt; i++) {
+
+    //     seL4_Word id = kernel_logging_entry_get_key(&kernel_log_buffer[i]);
+    //     seL4_Word value = kernel_logging_entry_get_data(&kernel_log_buffer[i]);
+    //     results->tracepoints[id][i] = value;
+    // }
 
     // copy results_local to results
     memcpy(results->irq_signal_low_results, results_local, N_RUNS * sizeof(ccnt_t));
